@@ -3,6 +3,7 @@ from mcp.server.fastmcp import FastMCP
 
 from . import config, db, llm
 from .github import GitHubClient
+from .query import query_stars as _query_stars
 from .sync import sync_stars as _sync_stars
 from .tag import tag_repos as _tag_repos
 
@@ -49,6 +50,45 @@ def tag_repos(retag_stale: bool = False, batch_size: int = 20,
             ttl_days=config.tag_ttl_days(),
             readme_max_chars=config.readme_max_chars(),
         )
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+def query_stars(mode: str = "list", group_by: str | None = None,
+                category: list[str] | None = None,
+                audience: list[str] | None = None,
+                niche: list[str] | None = None,
+                status: list[str] | None = None,
+                language: list[str] | None = None,
+                starred_after: str | None = None,
+                starred_before: str | None = None,
+                min_stars: int | None = None, max_stars: int | None = None,
+                sort: str = "stars_desc", limit: int = 50,
+                offset: int = 0) -> dict:
+    """Query synced stars along five dimensions; no GitHub/LLM call needed.
+
+    Dimensions: 功能用途 (category), 面向用户 (audience: 开发者/设计师/终端用户/
+    运维/研究者/未知), 小众偏门 (niche: 极小众/小众/成熟/主流), 项目状态
+    (status: 活跃/停更/archived), star 时间 (starred_after/before, YYYY or
+    YYYY-MM-DD). All filters are optional, combine with AND, and a list-valued
+    filter is OR within itself.
+
+    mode="list" returns a paginated repo list (limit/offset, max limit 500);
+    mode="aggregate" needs group_by (category|audience|niche|status|year|
+    language) and returns count-per-bucket. Category names are LLM-generated —
+    call aggregate(group_by="category") first to discover them, then filter.
+    Illegal mode/group_by/enum values return a structured error, not an
+    exception. Requires a synced (and ideally tagged) DB; empty DB → total 0.
+    """
+    conn = db.connect(config.db_path())
+    try:
+        return _query_stars(
+            conn, mode=mode, group_by=group_by, category=category,
+            audience=audience, niche=niche, status=status, language=language,
+            starred_after=starred_after, starred_before=starred_before,
+            min_stars=min_stars, max_stars=max_stars, sort=sort,
+            limit=limit, offset=offset)
     finally:
         conn.close()
 
