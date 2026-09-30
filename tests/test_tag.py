@@ -247,6 +247,72 @@ def test_not_stale_within_ttl_skips(conn):
     assert llm2.call_count == 0
 
 
+def test_stale_retag_refreshes_analyzed_at_and_converges(conn):
+    """bug① regression: a stale repo re-tagged must get a fresh analyzed_at,
+    so the NEXT retag_stale run sees it as fresh and makes zero LLM calls.
+    Without the fix, analyzed_at stayed stale → infinite re-tagging."""
+    _insert_repo(conn, 1, "o/a")
+    tag_repos(conn, FakeGitHub({"o/a": "# A"}), _fake_llm(_standard_scripts()))
+    # force staleness: analyzed_at 200 days ago
+    old = (datetime.now(timezone.utc) - timedelta(days=200)).isoformat()
+    conn.execute("UPDATE repo_analysis SET analyzed_at=? WHERE repo_id=1", (old,))
+    conn.commit()
+
+    # run2: retag_stale re-tags the stale repo AND re-stamps analyzed_at
+    llm2 = _fake_llm(_standard_scripts())
+    r2 = tag_repos(conn, FakeGitHub({"o/a": "# A"}), llm2,
+                   retag_stale=True, ttl_days=90)
+    assert r2["tagged"] == 1
+    refreshed = conn.execute(
+        "SELECT analyzed_at FROM repo_analysis WHERE repo_id=1").fetchone()[0]
+    assert refreshed != old
+    assert refreshed > old  # ISO timestamps sort lexically → newer
+    # repo re-entered backfill and got a category again
+    assert conn.execute(
+        "SELECT category FROM repo_analysis WHERE repo_id=1").fetchone()[0]
+
+    # run3: now fresh → converged, zero LLM calls (no infinite re-tagging)
+    llm3 = _fake_llm(_standard_scripts())
+    r3 = tag_repos(conn, FakeGitHub({"o/a": "# A"}), llm3,
+                   retag_stale=True, ttl_days=90)
+    assert r3["tagged"] == 0
+    assert llm3.call_count == 0
+
+
+def test_incremental_run_no_dangling_category(conn):
+    """bug② regression: adding new repos on a later run must not re-cluster and
+    orphan existing repos' categories. Every repo's category must stay in the
+    categories table even if the cluster script would return different names."""
+    _insert_repo(conn, 1, "o/a")
+    # run1: builds categories 类目0..类目24, backfills repo1
+    tag_repos(conn, FakeGitHub({"o/a": "# A"}), _fake_llm(_standard_scripts()))
+    cats_after_run1 = set(db.category_names(conn))
+
+    # run2: a new repo appears; even if clustering *would* return a different
+    # category set, the fix means it must NOT re-cluster (table non-empty).
+    _insert_repo(conn, 2, "o/b")
+    different = {
+        "free": lambda u: {"tags": ["工具"], "audience": "x", "summary": "y"},
+        # different names — must never be used, since clustering is skipped
+        "cluster": lambda u: {"categories": [
+            {"name": f"NEW{i}", "description": "d", "member_tags": [f"t{i}"]}
+            for i in range(25)]},
+        "backfill": lambda u: {"category": "类目0"},
+    }
+    llm2 = _fake_llm(different)
+    tag_repos(conn, FakeGitHub({"o/b": "# B"}), llm2)
+
+    # categories unchanged (no re-cluster), no NEW* names leaked in
+    assert set(db.category_names(conn)) == cats_after_run1
+    # every repo's category ∈ categories table (§六3, no dangling)
+    names = set(db.category_names(conn))
+    rows = conn.execute(
+        "SELECT repo_id, category FROM repo_analysis").fetchall()
+    assert len(rows) == 2
+    for r in rows:
+        assert r["category"] in names
+
+
 # --- failure isolation (§六6) -----------------------------------------------
 
 def test_one_repo_failure_isolated(conn):

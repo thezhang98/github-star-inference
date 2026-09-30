@@ -8,6 +8,9 @@ and backfill.
 ## Requirements
 
 - Python >= 3.10
+- SQLite >= 3.24 (the metadata layer uses `INSERT ... ON CONFLICT DO UPDATE`
+  UPSERT, added in SQLite 3.24 / 2018-06). Most Python 3.10+ builds ship a
+  newer SQLite; on an older system library, upgrade it or install `pysqlite3`.
 - [uv](https://docs.astral.sh/uv/) for dependency management
 
 ## Setup

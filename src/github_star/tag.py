@@ -128,15 +128,21 @@ def _phase_free_tag(conn, llm, repos, max_chars, retag_stale, batch_size):
             tags = ["uncategorized"]  # empty-info fallback (§五1)
         tags = tags[:5]
         now = _now()
-        # re-tag: clear old round-1 tags so stale labels don't linger (§澄清①)
-        if retag_stale:
-            db.clear_round1_tags(conn, repo["id"])
-        db.add_round1_tags(conn, repo["id"], tags, llm.model, now)
-        db.upsert_analysis(conn, repo["id"], {
+        analysis = {
             "summary": (out.get("summary") or "").strip() or None,
             "audience": (out.get("audience") or "").strip() or None,
             "model": llm.model,
-        })
+        }
+        if retag_stale:
+            # clear old round-1 tags so stale labels don't linger (§澄清①), and
+            # reset category+analyzed_at so this repo re-enters backfill and gets
+            # a fresh analyzed_at. Without this, a stale repo is re-tagged but
+            # never re-stamped → judged stale forever → infinite LLM calls (bug①).
+            db.clear_round1_tags(conn, repo["id"])
+            analysis["category"] = None
+            analysis["analyzed_at"] = None
+        db.add_round1_tags(conn, repo["id"], tags, llm.model, now)
+        db.upsert_analysis(conn, repo["id"], analysis)
         tagged += 1
         if tagged % batch_size == 0:
             conn.commit()
@@ -239,10 +245,14 @@ def tag_repos(conn, client, llm, retag_stale: bool = False,
     stats["tagged"], stats["tag_skipped"] = _phase_free_tag(
         conn, llm, to_tag, readme_max_chars, retag_stale, batch_size)
 
-    # phase 3: clustering — only when the tag universe changed (new/re-tagged
-    # repos) or no categories exist yet (first run / resume-after-kill).
-    # A clean rerun with nothing new re-uses the existing categories → 0 calls.
-    if stats["tagged"] > 0 or db.category_count(conn) == 0:
+    # phase 3: clustering — ONLY when no categories exist yet (first run /
+    # resume-after-kill). Incremental/re-tag runs deliberately do NOT re-cluster:
+    # rebuilding the category set would rename categories and leave already-
+    # backfilled repos pointing at deleted names (dangling category, bug②).
+    # New/re-tagged repos are instead backfilled against the EXISTING catalog.
+    # (Rebuilding the whole taxonomy once enough new repos accrue is out of M2
+    # scope — see known limitations; deferred to a future milestone.)
+    if db.category_count(conn) == 0:
         db.set_meta(conn, "tag_phase", "clustering")
         conn.commit()
         stats["categories"] = _phase_cluster(conn, llm)
