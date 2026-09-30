@@ -8,6 +8,7 @@ import httpx
 API_ROOT = "https://api.github.com"
 STARRED_PATH = "/user/starred"
 STAR_ACCEPT = "application/vnd.github.star+json"  # yields {starred_at, repo}
+RAW_ACCEPT = "application/vnd.github.raw+json"    # README as raw text
 API_VERSION = "2022-11-28"
 PER_PAGE = 100
 
@@ -27,10 +28,10 @@ class GitHubClient:
         self._sleep = sleep
         self._client = client or httpx.Client(timeout=30.0)
 
-    def _headers(self) -> dict:
+    def _headers(self, accept: str = STAR_ACCEPT) -> dict:
         return {
             "Authorization": f"Bearer {self._token}",
-            "Accept": STAR_ACCEPT,
+            "Accept": accept,
             "X-GitHub-Api-Version": API_VERSION,
         }
 
@@ -57,13 +58,19 @@ class GitHubClient:
         # secondary rate limit: exponential backoff with jitter
         return min(BACKOFF_CAP, BACKOFF_BASE * (2 ** attempt)) + random.random()
 
-    def _get(self, url: str, params: dict | None = None) -> httpx.Response:
-        """GET with retry on 403/429 and transient network errors."""
+    def _get(self, url: str, params: dict | None = None,
+             accept: str = STAR_ACCEPT,
+             not_found_ok: bool = False) -> httpx.Response | None:
+        """GET with retry on 403/429 and transient network errors.
+
+        With ``not_found_ok`` a 404 returns None instead of raising (used for
+        repos without a README).
+        """
         last_exc: Exception | None = None
         for attempt in range(MAX_RETRIES + 1):
             try:
                 resp = self._client.get(
-                    url, headers=self._headers(), params=params,
+                    url, headers=self._headers(accept), params=params,
                 )
             except httpx.TransportError as exc:  # timeout / connection error
                 last_exc = exc
@@ -77,6 +84,8 @@ class GitHubClient:
 
             if resp.status_code == 401:
                 raise GitHubError("token 无效或缺权限 (401)")
+            if not_found_ok and resp.status_code == 404:
+                return None
             if resp.status_code in (403, 429):
                 if attempt == MAX_RETRIES:
                     raise GitHubError(
@@ -91,6 +100,16 @@ class GitHubClient:
                 )
             return resp
         raise GitHubError(f"request failed: {last_exc}")
+
+    def get_readme(self, owner: str, name: str) -> str | None:
+        """Fetch a repo's README as raw text, or None if it has none (404).
+
+        Reuses the shared retry / rate-limit path; only the Accept header
+        differs (raw markdown instead of the star+json listing header).
+        """
+        url = f"{API_ROOT}/repos/{owner}/{name}/readme"
+        resp = self._get(url, accept=RAW_ACCEPT, not_found_ok=True)
+        return resp.text if resp is not None else None
 
     def iter_starred(self) -> Iterator[list[dict]]:
         """Yield pages of starred items ({starred_at, repo}), sorted newest first."""
