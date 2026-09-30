@@ -1,8 +1,9 @@
 # github-star-inference
 
-An MCP server that syncs your GitHub stars into a local SQLite database and (in
-later milestones) tags and analyzes them. This is **M1**: the project skeleton,
-data layer, and the `sync_stars` tool.
+An MCP server that syncs your GitHub stars into a local SQLite database and
+tags/analyzes them with an LLM. **M1** added the skeleton, data layer, and
+`sync_stars`; **M2** adds `tag_repos` — LLM free-tagging, category convergence,
+and backfill.
 
 ## Requirements
 
@@ -84,6 +85,54 @@ timestamps.
 - Missing `GITHUB_TOKEN` fails **before** any request. An invalid token (401)
   fails immediately and is **not** retried.
 - Requests are sequential (no concurrency) to avoid secondary rate limits.
+
+## The `tag_repos` tool (M2)
+
+```
+tag_repos(retag_stale: bool = False, batch_size: int = 20, limit: int | None = None) -> dict
+```
+
+Tags the repos `sync_stars` collected, in four resumable phases:
+
+1. **Fetch README** for repos missing one (truncated to `README_MAX_CHARS`,
+   default 4000; a repo with no README is stored as empty so it isn't refetched).
+2. **Free-tag (round 1):** the LLM reads `full_name` + description + topics +
+   language + README and returns 3–5 free tags, an audience line, and a summary.
+   These land in `repo_tags(round=1)` and `repo_analysis`.
+3. **Cluster (pure LLM):** all round-1 tags + frequencies are converged into
+   20–40 categories (`categories` table). If the model returns a count outside
+   20–40 it's reprompted up to twice; a persistent out-of-band result is
+   accepted with a logged warning (hard bounds 15/50 stop the loop).
+4. **Backfill:** each tagged repo is assigned one category, plus a
+   script-computed `niche_bucket` (by stars) and `status_class` (archived /
+   停更 / 活跃), and `analyzed_at` is stamped.
+
+### Zero repeat calls & staleness
+
+Only untagged repos reach the LLM. A rerun with nothing new makes **zero LLM
+calls** — the returned `llm_calls` counter (also stored in
+`meta.last_tag_llm_calls`) makes this assertable. `retag_stale=True` also
+re-tags repos whose `analyzed_at` is older than `TAG_TTL_DAYS` (default 90),
+deleting their old round-1 tags first so nothing stale lingers.
+
+### Resumable & failure-isolated
+
+Each batch (`batch_size`) is committed, and the current phase is tracked in
+`meta.tag_phase`, so a killed run resumes without duplicate calls or rows. If
+one repo's LLM call fails all retries, that repo is **skipped and left
+untagged** (retried on the next run) — the batch never aborts and no partial
+row is written.
+
+### Configuration
+
+Needs `GITHUB_TOKEN` (README fetch) and an OpenAI-compatible LLM: `LLM_API_KEY`
+(required), `LLM_BASE_URL` (default `https://api.deepseek.com`), `LLM_MODEL`
+(default `deepseek-chat`). Optional: `TAG_TTL_DAYS`, `README_MAX_CHARS`,
+`USER_FOCUS_AREAS` (comma-separated hint that nudges category convergence).
+See `.env.example`. DeepSeek keys: https://platform.deepseek.com/.
+
+> Offline tests mock both GitHub and the LLM. Real end-to-end tagging against a
+> live LLM endpoint is pending verification in a key-bearing environment.
 
 ## Known limitations (M1)
 
