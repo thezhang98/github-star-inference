@@ -4,6 +4,8 @@ from mcp.server.fastmcp import FastMCP
 from . import config, db, llm
 from .github import GitHubClient
 from .query import query_stars as _query_stars
+from .report import generate_report as _generate_report
+from .search import build_search
 from .sync import sync_stars as _sync_stars
 from .tag import tag_repos as _tag_repos
 
@@ -89,6 +91,36 @@ def query_stars(mode: str = "list", group_by: str | None = None,
             starred_after=starred_after, starred_before=starred_before,
             min_stars=min_stars, max_stars=max_stars, sort=sort,
             limit=limit, offset=offset)
+    finally:
+        conn.close()
+
+
+@mcp.tool()
+def generate_report(write_to: str | None = None) -> dict:
+    """Produce the Star analysis report + idea list from the local DB in one call.
+
+    Reads the tagged library (requires a prior sync_stars + tag_repos) and
+    returns a dict with `report_markdown` (5 sections: 总览 / 功能类目全景 /
+    小众宝藏 Top20 / 遗产项目 / 兴趣时间线), `ideas_markdown` (≥10 ideas,
+    衍生型 + 组合型; every repo reference is validated to exist in the library),
+    and `meta` (counts + snapshot time).
+
+    Combo ideas carry a demand-verification field: server-side evidence when
+    SEARCH_PROVIDER + SEARCH_API_KEY are set, otherwise a 未验证 note handing
+    verification to the client dialogue. Requires LLM_API_KEY for idea
+    discovery. If `write_to` is a directory path, also writes report.md and
+    ideas.md there.
+    """
+    llm_client = llm.build_client()  # raises if LLM_API_KEY missing
+    search = (build_search(config.search_provider(), config.search_api_key())
+              if config.search_configured() else None)
+    conn = db.connect(config.db_path())
+    try:
+        return _generate_report(
+            conn, llm_client, search=search, write_to=write_to,
+            active_recent_days=config.active_recent_days(),
+            max_combo_candidates=config.max_combo_candidates(),
+        )
     finally:
         conn.close()
 

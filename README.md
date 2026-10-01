@@ -3,7 +3,8 @@
 An MCP server that syncs your GitHub stars into a local SQLite database and
 tags/analyzes them with an LLM. **M1** added the skeleton, data layer, and
 `sync_stars`; **M2** adds `tag_repos` — LLM free-tagging, category convergence,
-and backfill.
+and backfill; **M3** adds `query_stars` — five-dimension filter/aggregate; **M4**
+adds `generate_report` — the Star analysis report + idea list.
 
 ## Requirements
 
@@ -136,6 +137,52 @@ See `.env.example`. DeepSeek keys: https://platform.deepseek.com/.
 
 > Offline tests mock both GitHub and the LLM. Real end-to-end tagging against a
 > live LLM endpoint is pending verification in a key-bearing environment.
+
+## The `generate_report` tool (M4)
+
+```
+generate_report(write_to: str | None = None) -> dict
+```
+
+One call reads the tagged library and returns a dict with three keys:
+
+- `report_markdown` — the **Star 数据分析报告**, 5 sections:
+  1. 总览 (star total, analyzed count, language distribution, snapshot time)
+  2. 功能用途细分类目全景 (each category + its top repos)
+  3. 小众宝藏 Top 20 — low-star but genuinely alive gems
+  4. 遗产项目 — archived vs 停更, listed separately, each tagged 值得复活 /
+     有现代替代品 / 纯遗产
+  5. 兴趣演变时间线 — category mix per star-year
+- `ideas_markdown` — the **想法清单** (≥10 when the library supports it), two kinds:
+  - 衍生型: direction + in-library data support + type + feasibility
+  - 组合型: the above + the A/B source repos + a demand-verification line
+- `meta` — repo totals, snapshot time, and per-section / per-idea counts.
+
+Every repo the report or ideas reference is validated to exist in the local
+DB — the LLM may only cite repos by id, and any out-of-library reference is
+dropped, so nothing is fabricated. The report reuses `query_stars` and M2's
+stored `niche_bucket` / `status_class`; it never recomputes them or builds a
+second query path.
+
+`write_to=<dir>` also writes `report.md` and `ideas.md` into that directory.
+
+### Demand verification (two channels)
+
+Combo ideas need their real-world demand checked. If `SEARCH_PROVIDER`
+(`tavily` | `brave`) **and** `SEARCH_API_KEY` are both set, the server verifies
+each combo via that search API and fills in evidence URLs + a conclusion. If
+either is unset, combo ideas carry a 未验证 note handing verification to the MCP
+client dialogue instead. A configured search that errors degrades to 未验证
+(with a `(搜索请求失败)` suffix) rather than aborting the report.
+
+### Configuration
+
+Needs `LLM_API_KEY` (idea discovery). Optional M4 knobs:
+`ACTIVE_RECENT_DAYS` (小众宝藏 recency window, default 180),
+`MAX_COMBO_CANDIDATES` (max combo pairs per LLM call, default 15),
+`SEARCH_PROVIDER` + `SEARCH_API_KEY` (demand verification, see above).
+Run `sync_stars` then `tag_repos` first — `generate_report` errors on an
+empty/untagged DB rather than emitting a shell report.
 
 ## Known limitations (M1)
 
