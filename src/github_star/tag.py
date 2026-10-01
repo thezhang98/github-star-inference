@@ -28,6 +28,15 @@ TARGET_MIN, TARGET_MAX = 20, 40   # desired category count
 HARD_MIN, HARD_MAX = 15, 50       # absolute bounds that stop the reprompt loop
 CLUSTER_REPROMPTS = 2             # extra attempts to land inside the target band
 
+# Only the most-frequent tags are clustered. Free-tagging yields a very long,
+# noisy tail — a few hundred repos produce ~1000+ distinct tags, nearly all
+# appearing once — and feeding the whole list makes the model loop/degenerate
+# and overflow its JSON response (observed as unterminated JSON on real data).
+# The top slice converges cleanly into 20–40 categories; rare one-off tags are
+# still covered because backfill assigns every repo to the best resulting
+# category via its own call, regardless of whether its tags were in this sample.
+CLUSTER_MAX_TAGS = 250
+
 _FREE_SYSTEM = (
     "你是开源项目分类助手。阅读一个 GitHub 仓库的元信息，输出严格的 JSON："
     '{"tags": [3-5个中文自由标签], "audience": "面向用户/受众一句话", '
@@ -155,6 +164,9 @@ def _phase_cluster(conn, llm):
     freq = db.round1_tag_frequency(conn)
     if not freq:
         return 0
+    # cluster the most-frequent tags only; the long one-off tail is left to
+    # backfill (see CLUSTER_MAX_TAGS). freq is already count-desc.
+    freq = freq[:CLUSTER_MAX_TAGS]
     lines = "\n".join(f"{tag} ({n})" for tag, n in freq)
     from . import config
     focus = config.user_focus_areas()
