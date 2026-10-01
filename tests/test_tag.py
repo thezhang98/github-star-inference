@@ -364,3 +364,31 @@ def test_backfill_off_catalog_snaps_to_valid(conn):
     cat = conn.execute(
         "SELECT category FROM repo_analysis WHERE repo_id=1").fetchone()["category"]
     assert cat in set(db.category_names(conn))  # snapped onto the catalog
+
+
+def test_cluster_input_bounded_to_top_tags(conn):
+    """P0 regression (real-data): a large distinct-tag set must not all be sent
+    to the cluster call — hundreds of repos yield 1000+ one-off tags, which made
+    the model loop and overflow its JSON. Only the top CLUSTER_MAX_TAGS go in."""
+    from github_star.tag import CLUSTER_MAX_TAGS
+    # one repo per distinct free tag → far more distinct tags than the bound
+    n = CLUSTER_MAX_TAGS + 50
+    for i in range(n):
+        _insert_repo(conn, i + 1, f"o/r{i}")
+
+    seen = {}
+    scripts = _standard_scripts(25)
+    scripts["free"] = lambda u, i=iter(range(n)): {
+        "tags": [f"tag{next(i)}"], "audience": "开发者", "summary": "s"}
+
+    def cluster(user):
+        seen["tag_lines"] = sum(1 for ln in user.splitlines() if ln.endswith(")"))
+        return {"categories": [{"name": f"类目{k}", "description": "d",
+                                "member_tags": []} for k in range(25)]}
+    scripts["cluster"] = cluster
+
+    readmes = {f"o/r{i}": "# r" for i in range(n)}
+    result = tag_repos(conn, FakeGitHub(readmes), _fake_llm(scripts))
+
+    assert seen["tag_lines"] <= CLUSTER_MAX_TAGS   # the long tail was dropped
+    assert result["phase"] == "completed"          # no crash on the big set
